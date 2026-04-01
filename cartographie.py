@@ -173,12 +173,6 @@ for prefset in prefs.keys():
                 if len(current) >= 3:
                     if current[0] != current[-1]:
                         current.append(current[0])
-                    # try: # 
-                    #     poly = Polygon(current)
-                    #     if poly.is_valid and not poly.is_empty:
-                    #         text_polygons.append(poly)
-                    # except Exception:
-                    #     pass  # skip bad geometries
                     poly = Polygon(current)
                     if poly.is_valid and not poly.is_empty:
                         text_polygons.append(poly)
