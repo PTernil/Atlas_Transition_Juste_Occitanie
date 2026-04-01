@@ -6,6 +6,7 @@ Created on Thu Mar 26 13:06:35 2026
 """
 import sys
 from pathlib import Path
+import pandas as pd
 import geopandas as gpd
 import fiona
 
@@ -26,6 +27,8 @@ geom_columns_dict = {'dep':['département','departement','dép','dep',
                      'iris':['iris','code_iris'],
                      }
 
+geom_grid_dict = {'dep':'code','com':'code_insee','iris':'code_iris'}
+
 # Liste des fichiers contenant des données
 file_list = [x for x in Path(r"Données traitées").glob("**/*") if x.is_file()]
 for georef in (Path(r"Données traitées\Région.gpkg"),
@@ -40,7 +43,6 @@ file_list = [file.stem for file in file_list]
 
 # Liste des formats supportés
 format_list=['GeoPackage (.gpkg)','Comma Separated Values (.csv)']
-
 
 def import_progress(filepath, compact=True):
     """
@@ -64,7 +66,7 @@ def import_progress(filepath, compact=True):
     """
     if type(filepath)==str:
         filepath = Path(filepath)
-    if filepath.parts[-1][-5:]==".gpkg":
+    if filepath.parts[-1].endswith(".gpkg"):
         with fiona.open(filepath) as src:
             # Initialisation des variables de comptage
             if not compact:
@@ -82,20 +84,46 @@ def import_progress(filepath, compact=True):
                     last_percent = percent
                     if compact:
                         sys.stdout.write(f"\r{filepath} : Importation... {percent}% ({i}/{total})")
-                        sys.stdout.flush()
                     else:
                         sys.stdout.write(f"\rImportation... {percent}% ({i}/{total})")
-                        sys.stdout.flush()
-        if not compact:
-            print("\nImportation terminée !", flush=True)
+                    sys.stdout.flush()
         data = gpd.GeoDataFrame.from_features(features, crs=src.crs)
         data.name=filepath
+        if not compact:
+            print("\nImportation terminée !", flush=True)
         return data
-    elif filepath.parts[-1][-4:]==".csv":
-        return None
-    raise TypeError("Format de données non supporté. Formats valides :\n\
-                    \r\tGeoPackage (.gpkg)\n\
-                    \r\tComma Separated Values (.csv)")
+    elif filepath.parts[-1].endswith(".csv"):
+        if not compact:
+            print(f"{filepath}")
+        # Initialisation des variables de comptage, en blocs d'environ 1% du nombre d'IRIS
+        chunk_size = 50
+        total = sum(1 for _ in open(filepath)) - 1
+        chunks = []
+        last_percent = -1
+        read_rows = 0
+        # Efface la ligne avant de commencer
+        sys.stdout.write("\x1b[1K\r")
+        # Importation des données par bloc et comptage
+        for chunk in pd.read_csv(filepath, chunksize=chunk_size, dtype='str'):
+            chunks.append(chunk)
+            read_rows += len(chunk)
+            percent = int((read_rows / total) * 100)
+            if percent != last_percent:
+                last_percent = percent
+                if compact:
+                    sys.stdout.write(f"\r{filepath} : Importation... {percent}% ({read_rows}/{total})")
+                else:
+                    sys.stdout.write(f"\rImportation... {percent}% ({read_rows}/{total})")
+                sys.stdout.flush()
+        data = pd.concat(chunks, ignore_index=True)
+        data.name = filepath
+        data.loc[:,data.columns.str.contains('_data')]=data.loc[:,data.columns.str.contains('_data')].apply(pd.to_numeric).convert_dtypes()
+        if not compact:
+            print("\nImportation terminée !", flush=True)
+        return data
+    else:
+        raise TypeError("Format de données non supporté. Formats valides :\n\
+                    \r-\t{'\n\r-\t'.join(format_list)}\n")
 
 def ask_filepath():
     """
@@ -172,7 +200,7 @@ def check_filepath(filepath):
             valid = valid+1
     return valid,filepath
 
-def ask_geom():
+def ask_geom(data):
     """
     Demande à l'utilisateur un nom de géométrie à laquelle raccrocher les données.
     En cas d'échec, répète la demande.
@@ -192,6 +220,27 @@ def ask_geom():
                    \r\t- Commune/com\n\t- IRIS\n\t- Autre\n\
                    \r Sélectionnez 'Autre' pour des données dont la localisation est incluse.\n").lower()
     geom = geom_dict[geom]
+    if geom !=None:
+        for column in data.columns:
+            if data[column].dtype=='geometry':
+                del_geom = input(f"Attention : Le jeu de données fourni contient déjà une géométrie ({column}).\n\
+                                 \rSupprimer la géométrie actuelle et procéder au raccordement ? [y]/n\n")
+                while del_geom not in ['y','n','']:
+                    del_geom = input("Attention : Le jeu de données fourni contient déjà une géométrie ({column}).\n\
+                                     \rSupprimer la géométrie actuelle et procéder au raccordement ? [y]/n\n")
+                if del_geom=='n':
+                    del_geom = input("Utiliser la géométrie interne au jeu de données fourni ? [y]/n\n\
+                                     \rSélectionnez 'n' pour recommencer l'importation des données.\n")
+                    while del_geom not in ['y','n','']:
+                        del_geom = input("Utiliser la géométrie interne au jeu de données fourni ? [y]/n\n\
+                                         \rSélectionnez 'n' pour recommencer l'importation des données.\n")
+                    if del_geom in ['y','']:
+                        geom = None
+                    else:
+                        raise ValueError("Retour au début de l'importation")
+                else:
+                    print("Suppression de la géométrie des données.")
+                    data = data.drop(column, axis=1)
     return geom
 
 def search_geom(geom_grid, data, geom_data=None):
@@ -242,7 +291,7 @@ def search_geom(geom_grid, data, geom_data=None):
             else :
                 raise ValueError(f"{data.name} contient plusieurs colonnes portant ce nom et contenant une géométrie.\n\
                                  \rIl est impossible de l'utiliser en l'état")
-    elif geom_data is None:    # Géométrie 'type'
+    elif geom_data is None:    # Géométrie 'type' (dans geom_columns_dict)
         geoms = geom_columns_dict[geom_grid]
         columns = data.columns
         for column in columns:
@@ -256,7 +305,7 @@ def search_geom(geom_grid, data, geom_data=None):
         geom_data = search_geom(geom_grid, data, geom_data)
     elif geom_data=='':
         return geom_data
-    else:   # Géométrie non prévue, nom de la colonne fourni
+    else:   # Géométrie non prévue dans geom_columns_dict, nom de la colonne fourni
         columns=data.columns
         for column in columns:
             if geom_data.lower()==column.lower():
