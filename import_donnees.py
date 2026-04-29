@@ -9,25 +9,43 @@ from pathlib import Path
 import pandas as pd
 import geopandas as gpd
 import fiona
+import operator
+from matplotlib.colors import is_color_like
+import numpy as np
 
 # Types de géométries de raccordement
 geom_dict = {'département':'dep','departement':'dep','dép':'dep','dep':'dep',
              'commune':'com','comm':'com','com':'com',
              'iris':'iris',
+             'maille safran':'maille_safran','safran':'maille_safran',
+             'maille drias':'maille_drias','drias':'maille_drias',
              'autre':None
              }
 
 # Noms de colonnes dans les données pouvant être raccordées automatiquement aux références
 geom_columns_dict = {'dep':['département','departement','dép','dep',
                             'code_département','code_departement',
-                            'code_dép','code_dep'],
+                            'code_dép','code_dep','dept'],
                      'com':['commune','comm','com',
                             'code_commune','code_comm','code_com',
-                            'code_insee'],
-                     'iris':['iris','code_iris'],
+                            'code_insee','codgeo'],
+                     'iris':['iris','code_iris','code iris'],
+                     'maille_safran':['id safran','id_safran','maille_safran'], # Au moins un jeu de données confond les mailles safran et drias
+                     'maille_drias':['id safran','id_safran','maille_drias'] # Raccordement automatique peu fiable
                      }
+# Noms de colonnes des géométries de référence
+geom_grid_dict = {'dep':'code','com':'code_insee','iris':'code_iris',
+                  'maille_safran':'maille_safran','maille_drias':'maille_drias'}
 
-geom_grid_dict = {'dep':'code','com':'code_insee','iris':'code_iris'}
+# Type de données affichables
+data_types = ['Densité','Score','Compte','Localisation de points','Tracés']
+cmap_data = ['Densité','Score']
+
+cmap_classification={'Aucune':None,'Jenks':'FisherJenks','Tête/Queue':'HeadTailBreaks','Personnalisée':'UserDefined'}
+cmap_classification_entries={'aucune':'Aucune','none':'Aucune',
+                             'jenks':'Jenks',
+                             'tête/queue':'Tête/Queue','tete/queue':'Tête/Queue','têtequeue':'Tête/Queue','tetequeue':'Tête/Queue',
+                             'personnalisée':'Personnalisée','personnalisee':'Personnalisée','perso':'Personnalisée'}
 
 # Liste des fichiers contenant des données
 file_list = [x for x in Path(r"Données traitées").glob("**/*") if x.is_file()]
@@ -37,14 +55,138 @@ for georef in (Path(r"Données traitées\Région.gpkg"),
                Path(r"Données traitées\IRIS.gpkg"),
                Path(r"Données traitées\Pays limitrophes.gpkg"),
                Path(r"Données traitées\Régions limitrophes.gpkg"),
-               Path(r"Données traitées\Départements limitrophes.gpkg")):
+               Path(r"Données traitées\Départements limitrophes.gpkg"),
+               Path(r"Données traitées\maille drias.gpkg"),
+               Path(r"Données traitées\maille safran.gpkg"),
+               Path(r"Données traitées\Correspondance_echelle_admin.csv")):
     file_list.remove(georef)
 file_list = [file.stem for file in file_list]
+
+deprecated_codes={'12076':'12218','120760000':'122180000'}
 
 # Liste des formats supportés
 format_list=['GeoPackage (.gpkg)','Comma Separated Values (.csv)']
 
-def import_progress(filepath, compact=True):
+# Traitements possibles à l'importation
+treatments = ['MeanRatio','MedianRatio','Aucun']
+
+# Méthodes d'opérations entre variables
+methods = ["Indicateur synthétique","Intersection et union géographique"]
+methods_entries = {'indicateur':"Indicateur synthétique",'indic':"Indicateur synthétique",'synth':"Indicateur synthétique",
+                   'inter':"Intersection et union géographique",'intersection':"Intersection et union géographique",
+                   'cumul':"Intersection et union géographique",'union':"Intersection et union géographique"}
+inter_methods = ['Union','Intersection']
+inter_methods_entries = {'inter':'intersection','1':'intersection','0':'union'}
+# Méthodes de sélection du seuil pour intersection géographique
+level_method = ["Valeur","Quantile"]
+level_dir_list = ["Au-dessus du seuil","En-dessous du seuil"]
+level_dir_entries = {'1':"Au-dessus du seuil",'0':"En-dessous du seuil"}
+# Échelles d'affichage
+admin_scales = {'département':['epci','com','iris'],'epci':['com','iris'],'commune':['iris'],'iris':None}
+admin_scales_entries = {'dep':'département',
+                        'com':'Commune'}
+admin_scales_names = {'département':'DEP','epci':'EPCI','commune':'code_insee','iris':'code_iris'}
+
+
+def safe_ask(query,datatype):
+    """
+    Demande à l'utilisateur des données d'un type spécifié.
+    Réitère la demande jusqu'à ce que les types correspondent
+
+    Parameters
+    ----------
+    query : str
+        Texte affiché lors de la demande de données.
+    datatype : type, list(type) ou fonction
+        Type de données à demander ou fonction vérifiant l'interprétabilité
+
+    Returns
+    -------
+    var : datatype
+        Donnée demandée à l'utilisateur.
+
+    """
+    var = input(query)
+    if isinstance(datatype,type):
+        while not isinstance(var, datatype):
+            try:
+                if datatype is bool:
+                    try:
+                        var = int(var)
+                    except:
+                        if var=='False':
+                            var=False
+                var = datatype(var)
+            except:
+                print("Type invalide.")
+                var = input(query)
+        return var
+    elif isinstance(datatype,list):
+        valid_cast = False
+        while not valid_cast:
+            for datatype_ in datatype:
+                try:
+                    var = datatype_(var)
+                    valid_cast = True
+                    break
+                except:
+                    pass
+            if not valid_cast:
+                print("Type invalide.")
+                var = input(query)
+        return var
+    else: # datatype est une fonction de vérification
+        valid_cast = datatype(var)
+        while not valid_cast:
+            var = input(query)
+            valid_cast = datatype(var)
+        return var
+                
+def select_list(choices, query=None, fail_query=None, catch_dict=None):
+    """
+    Demande à l'utilisateur de choisir un élément dans une liste de str
+
+    Parameters
+    ----------
+    choices : list(str)
+        Listes des valeurs possibles.
+    query : str, optional
+        Demande à transmettre à l'utilisateur. Par défaut, None.
+    fail_query : str, optional
+        Demande réitérée en cas de valeur invalide. Par défaut, None.
+    catch_list : dict, optional
+        Tentatives de rattrapage des erreurs d'input
+    
+    Returns
+    -------
+    str
+        Choix retenu.
+
+    """
+    if query is None:
+        query = f"Sélectionnez un élément parmi :\n\
+        \r\t- {'\n\r\t- '.join(choices)}\n"
+    element = input(query)
+    if not catch_dict is None:
+        try:
+            element = catch_dict[element.lower()]
+        except:
+            pass
+    found = False
+    while not found:
+        for n in range(len(choices)):
+            if element.lower() == choices[n].lower():
+                return choices[n]
+        if fail_query is None :
+            fail_query = f"'{element}' n'est pas un choix valide.\n"+query
+        element = input(fail_query)
+        if not catch_dict is None:
+            try:
+                element = catch_dict[element]
+            except:
+                pass
+
+def import_progress(filepath, treatment=None, compact=True):
     """
     Importe des données géographiques ou non en affichant l'état d'avancement.
     Formats supportés :
@@ -62,11 +204,11 @@ def import_progress(filepath, compact=True):
     -------
     data : GeoPandas.GeoDataFrame
         Données du fichier cible.
-
+    
     """
-    if type(filepath)==str:
+    if isinstance(filepath,str):
         filepath = Path(filepath)
-    if filepath.parts[-1].endswith(".gpkg"):
+    if filepath.suffix=='.gpkg':
         with fiona.open(filepath) as src:
             # Initialisation des variables de comptage
             if not compact:
@@ -88,11 +230,11 @@ def import_progress(filepath, compact=True):
                         sys.stdout.write(f"\rImportation... {percent}% ({i}/{total})")
                     sys.stdout.flush()
         data = gpd.GeoDataFrame.from_features(features, crs=src.crs)
-        data.name=filepath
+        data.attrs['name'] = filepath
         if not compact:
             print("\nImportation terminée !", flush=True)
         return data
-    elif filepath.parts[-1].endswith(".csv"):
+    elif filepath.suffix=='.csv':
         if not compact:
             print(f"{filepath}")
         # Initialisation des variables de comptage, en blocs d'environ 1% du nombre d'IRIS
@@ -116,26 +258,85 @@ def import_progress(filepath, compact=True):
                     sys.stdout.write(f"\rImportation... {percent}% ({read_rows}/{total})")
                 sys.stdout.flush()
         data = pd.concat(chunks, ignore_index=True)
-        data.name = filepath
-        data.loc[:,data.columns.str.contains('_data')]=data.loc[:,data.columns.str.contains('_data')].apply(pd.to_numeric).convert_dtypes()
+        data.attrs['name'] = filepath
+        data.loc[:,data.columns.str.endswith('_data')]=data.loc[:,data.columns.str.endswith('_data')].apply(pd.to_numeric).convert_dtypes()
+        if treatment == 'MeanRatio':
+            for column in data.columns[data.columns.str.endswith('_data')]:
+                data[column] = data[column]/data[column].mean()
+        elif treatment == 'MedianRatio':
+            for column in data.columns[data.columns.str.endswith('_data')]:
+                data[column] = data[column]/data[column].median()
+        data.columns = data.columns.str.removesuffix('_data')
         if not compact:
             print("\nImportation terminée !", flush=True)
         return data
     else:
         raise TypeError("Format de données non supporté. Formats valides :\n\
-                    \r-\t{'\n\r-\t'.join(format_list)}\n")
+                    \r\t- {'\n\r\t- '.join(format_list)}\n")
+
+def import_fast(filepath, treatment=None, compact=True):
+    """
+    Importe des données géographiques ou non.
+    Formats supportés :
+        GeoPackage (.gpkg)
+        Comma Separated Values (.csv)
+    
+    Parameters
+    ----------
+    filepath : str
+        Chemin vers le fichier cible.
+    compact : bool
+        True : Sans affichage
+        False : Affichage restreint
+    
+    Returns
+    -------
+    data : GeoPandas.GeoDataFrame
+        Données du fichier cible.
+    
+    """
+    if isinstance(filepath,str):
+        filepath = Path(filepath)
+        if not compact:
+            print(f"{filepath}")
+    if filepath.suffix=='.gpkg':
+        data = gpd.read_file(filepath)
+        if treatment == 'MeanRatio':
+            for column in data.columns.drop('geometry'):
+                data[column] = data[column]/data[column].mean()
+        elif treatment == 'MedianRatio':
+            for column in data.columns.drop('geometry'):
+                data[column] = data[column]/data[column].median()
+        data.attrs['name'] = filepath
+        return data
+    elif filepath.suffix=='.csv':
+        data = pd.read_csv(filepath, dtype='str')
+        for col in data.columns[data.columns.str.endswith('_data')]:
+            data[col] = pd.to_numeric(data[col])
+        if treatment == 'MeanRatio':
+            for column in data.columns[data.columns.str.endswith('_data')]:
+                data[column] = data[column]/data[column].mean()
+        elif treatment == 'MedianRatio':
+            for column in data.columns[data.columns.str.endswith('_data')]:
+                data[column] = data[column]/data[column].median()
+        data.columns = data.columns.str.removesuffix('_data')
+        data.attrs['name'] = filepath
+        return data
+    else:
+        raise TypeError(f"Format de données non supporté. Formats valides :\n\
+                    \r\t- {'\n\r\t- '.join(format_list)}\n")
 
 def ask_filepath():
     """
     Demande à l'utilisateur un nom de fichier.
     Le vérifie et le reconstruit si nécessaire avec check_filepath
     En cas d'échec, demande un nouveau nom de fichier.
-
+    
     Returns
     -------
     filepath : pathlib.Path
         Chemin vers le fichier demandé à l'utilisateur.
-
+    
     """
     filepath = Path(input("\rNom du fichier contenant les données :\n"))
     while not check_filepath(filepath)[0]==3:
@@ -146,11 +347,11 @@ def ask_filepath():
         elif check_filepath(filepath)[0]<2:
             filepath = Path(input(f"Erreur : {filepath} ne correspond à aucun fichier dans l'environnement de travail.\n\
                                   \rListe des fichiers de données :\n\
-                                  \r-\t{'\n\r-\t'.join(file_list)}\n\
+                                  \r\t- {'\n\r\t- '.join(file_list)}\n\
                                   \rNom du fichier contenant les données :\n"))
         else:
-            filepath = Path(input(f"Erreur : Format de données non supporté. Formats valides :\n\r-\t\
-                                 {'\n\r-\t'.join(format_list)}\n\
+            filepath = Path(input(f"Erreur : Format de données non supporté. Formats valides :\n\r\t- \
+                                 {'\n\r\t- '.join(format_list)}\n\
                                  \rNom du fichier contenant les données :\n"))
     return filepath
 
@@ -158,12 +359,12 @@ def check_filepath(filepath):
     """
     Vérifie la validité du chemin fourni.
     Tente de le reconstruire si le chemin est invalide en l'état.
-
+    
     Parameters
     ----------
     filepath : pathlib.Path
         Chemin vers le fichier à importer.
-
+    
     Returns
     -------
     valid : int
@@ -174,9 +375,11 @@ def check_filepath(filepath):
     
     filepath : pathlib.Path
         Chemin vers le fichier à importer, reconstruit si nécessaire.
-
+    
     """
     # Vérification de l'existence du fichier
+    if len(filepath.parts)==0: # Chemin vide
+        return 0,filepath
     valid=2
     if not filepath.exists(): # Non : Chemin depuis le dossier de travail, avec extension
         if ("Données traitées"/filepath).exists():  # Nom du fichier, avec extension
@@ -204,20 +407,20 @@ def ask_geom(data):
     """
     Demande à l'utilisateur un nom de géométrie à laquelle raccrocher les données.
     En cas d'échec, répète la demande.
-
+    
     Returns
     -------
     geom : str
         Nom de la géométrie à laquelle raccrocher les données.
-
+    
     """
     geom = input("Géométrie de référence parmi :\n\t- Département/dep\n\
-                \r\t- Commune/com\n\t- IRIS\n\t- Autre\n\
+                \r\t- Commune/com\n\t- IRIS\n\t- Maille Safran\n\t- Maille Drias\n\t- Autre\n\
                 \rSélectionnez 'Autre' pour des données dont la localisation est incluse.\n").lower()
     while not geom in geom_dict.keys():
         geom = input(f"\nErreur :'{geom}' n'est pas une échelle valide.\n\
                    \rSélectionnez une échelle parmi :\n\t- Département/dep\n\
-                   \r\t- Commune/com\n\t- IRIS\n\t- Autre\n\
+                   \r\t- Commune/com\n\t- IRIS\n\t- Maille Safran\n\t- Maille Drias\n\t- Autre\n\
                    \r Sélectionnez 'Autre' pour des données dont la localisation est incluse.\n").lower()
     geom = geom_dict[geom]
     if geom !=None:
@@ -226,7 +429,7 @@ def ask_geom(data):
                 del_geom = input(f"Attention : Le jeu de données fourni contient déjà une géométrie ({column}).\n\
                                  \rSupprimer la géométrie actuelle et procéder au raccordement ? [y]/n\n")
                 while del_geom not in ['y','n','']:
-                    del_geom = input("Attention : Le jeu de données fourni contient déjà une géométrie ({column}).\n\
+                    del_geom = input(f"Attention : Le jeu de données fourni contient déjà une géométrie ({column}).\n\
                                      \rSupprimer la géométrie actuelle et procéder au raccordement ? [y]/n\n")
                 if del_geom=='n':
                     del_geom = input("Utiliser la géométrie interne au jeu de données fourni ? [y]/n\n\
@@ -245,8 +448,8 @@ def ask_geom(data):
 
 def search_geom(geom_grid, data, geom_data=None):
     """
+    Obtient le nom exact d'une colonne à partir d'approximations de l'utilisateur
     
-
     Parameters
     ----------
     geom_grid : str
@@ -258,13 +461,13 @@ def search_geom(geom_grid, data, geom_data=None):
         Nom de la colonne de data proposée pour être la clé de raccordement.
         Nom de la colonne proposée pour être la géométrie si geom_grid est None
         Par défaut, None.
-
+    
     Returns
     -------
     geom_data : str
         Nom de la colonne de data permettant la jointure sur la géométrie de référence.
         Si la géométrie est incluse dans les données, nom de la colonne contenant la géométrie
-
+    
     """
     if geom_grid is None:    # Géométrie interne aux données 
         if geom_data is None:   # Premier essai, recherche de la géométrie
@@ -274,8 +477,8 @@ def search_geom(geom_grid, data, geom_data=None):
             elif len(geoms)>1:   # Si plusieurs géométries sont trouvées, demande à l'utilisateur laquelle choisir
                 geom_data = input(f"\nLes données contiennent plusieurs géométries.\n\
                                   \rSélectionnez la géométrie voulue parmi :\n\
-                                  \r-\t{'\n\r-\t'.join(geoms)}\n")
-                geom_data = search_geom(geom_grid, data, geom_data)
+                                  \r\t- {'\n\r\t- '.join(geoms)}\n")
+                return search_geom(geom_grid, data, geom_data)
             else:
                 print("Les données ne contiennent pas de géométrie.\n\
                       \rRetour à la sélection de la géométrie de référence.")
@@ -289,7 +492,7 @@ def search_geom(geom_grid, data, geom_data=None):
             if len(columns)==1:
                 return columns[0]
             else :
-                raise ValueError(f"{data.name} contient plusieurs colonnes portant ce nom et contenant une géométrie.\n\
+                raise ValueError(f"{data.attrs['name']} contient plusieurs colonnes portant ce nom et contenant une géométrie.\n\
                                  \rIl est impossible de l'utiliser en l'état")
     elif geom_data is None:    # Géométrie 'type' (dans geom_columns_dict)
         geoms = geom_columns_dict[geom_grid]
@@ -300,9 +503,9 @@ def search_geom(geom_grid, data, geom_data=None):
                 return column
         geom_data = input(f"\nErreur : géométrie de raccordement introuvable dans les données.\n\
                      \rSélectionnez la clé de raccordement parmi :\n\
-                     \r-\t{'\n\r-\t'.join(columns)}\n\
+                     \r\t- {'\n\r\t- '.join(columns)}\n\
                      \rAppuyez sur Entrée pour revenir au choix de la géométrie de référence.\n")
-        geom_data = search_geom(geom_grid, data, geom_data)
+        return search_geom(geom_grid, data, geom_data)
     elif geom_data=='':
         return geom_data
     else:   # Géométrie non prévue dans geom_columns_dict, nom de la colonne fourni
@@ -312,6 +515,505 @@ def search_geom(geom_grid, data, geom_data=None):
                 return column
         geom_data = input(f"\nErreur : la clé fournie est absente des données.\n\
                      \rSélectionnez la clé de raccordement parmi :\n\
-                     \r-\t{'\n\r-\t'.join(columns)}\n")
-        geom_data = search_geom(geom_grid, data, geom_data)
+                     \r\t- {'\n\r\t- '.join(columns)}\n")
+        return search_geom(geom_grid, data, geom_data)
 
+def weighted_mean(series,pop_dataset=None,pop_variable=None):
+    """
+    Moyenne pondérée par la population
+
+    Parameters
+    ----------
+    series : pd.Series
+        Données à moyenner.
+    pop_dataset : pd.DataFrame, optional
+        Répartition de la population. Par défaut, None.
+    pop_variable : str, optional
+        Nom de la variable contenant la population. Par défaut, None.
+
+    Returns
+    -------
+    float
+        Moyenne pondérée par la population.
+
+    """
+    weights = pop_dataset.loc[series.index, pop_variable]
+    return (series * weights).sum() / weights.sum()
+
+admin_scale_aggfuncs = {'Somme':'sum','Moyenne pondérée':weighted_mean,'Suppression':None}
+admin_scale_aggfuncs_entries = {'sum':'Somme',
+                                'mean':'Moyenne pondérée','wmean':'Moyenne pondérée','moy':'Moyenne pondérée',
+                                'del':'Suppression'}
+def aggregate(dfs,min_scale,corr_table,pop_dataset,geoms):
+    """
+    Agrège les données fournies à un échelon administratif de taille fournie.
+    Si les données sont déjà à un niveau agrégé, les retourne telles quelles
+
+    Parameters
+    ----------
+    dfs : dict
+        Données d'entrée.
+    min_scale : str
+        Échelle d'agrégation.
+    corr_table : pd.DataFrame
+        Corespndance entre les échelles administratives.
+    pop_dataset : pd.DataFrame
+        Répartition de la population, pour calcul de l'agrégation.
+    geoms : list(tuple)
+        Liste des colonnes contenant les géométries des données d'entrée.
+
+    Returns
+    -------
+    dict
+        Données agrégées.
+
+    """
+    if min_scale=='iris':
+        return dfs
+    agg_df_list=[]
+    pop_dataset = pop_dataset.join(corr_table.set_index('code_iris'), on='code_iris')
+    pop_dataset = pop_dataset[['code_iris','code_insee','EPCI','DEP','P21_POP']]
+    n=0
+    for df_name in dfs:
+        if dfs[df_name].attrs['scale'] in admin_scales[min_scale]:
+            attrs = dfs[df_name].attrs
+            print(df_name)
+            print('-'*len(df_name))
+            df=dfs[df_name]
+            # Agrégation de la population à l'échelle des données pour traitement
+            pop_dataset_ = pop_dataset.set_index('code_iris').groupby(admin_scales_names[df.attrs['scale']]).sum()
+            # Demande des fonctions pour l'agrégation des données
+            aggfuncs={}
+            for col in df.columns:
+                if col!=geoms[n][1]:
+                    aggfunc = select_list(list(admin_scale_aggfuncs),
+                                          query=f"{col} :\nMéthode d'agrégation des données :\n\
+                                              \r\t- {'\n\r\t- '.join(list(admin_scale_aggfuncs))}\n",
+                                          catch_dict=admin_scale_aggfuncs_entries)
+                    if aggfunc=='Moyenne pondérée':
+                        aggfuncs.update({col: lambda s: weighted_mean(s, pop_dataset=pop_dataset_, pop_variable='P21_POP')})
+                    elif aggfunc=='Suppression':
+                        df = df.drop(col, axis=1)
+                    else:
+                        aggfuncs.update({col:admin_scale_aggfuncs[aggfunc]})
+            new_df = df.set_index(geoms[n][1]).groupby(by=corr_table.set_index(admin_scales_names[df.attrs['scale']])[admin_scales_names[min_scale]])
+            new_df = new_df.agg(func=aggfuncs).reset_index()
+            new_df.attrs = attrs
+            new_df.attrs.update({'scale':min_scale})
+            agg_df_list.append(new_df)
+        else:
+            agg_df_list.append(dfs[df_name])
+        n+=1
+    agg_dfs = dict(zip(dfs.keys(),agg_df_list))
+    return agg_dfs
+
+def list_overlay(df_list,proportional=False):
+    """
+    Réalise un overlay des GeoDataFrame passés en argument.
+    Gère la répétition des géométries en fusionnant les données basées sur la même géométrie,
+    avant l'appel de gpd.overlay
+
+    Parameters
+    ----------
+    df_list : list(geopandas.GeoDataFrame)
+        Liste des données sur lesquelles opérer l'overlay.
+    proportional : list(bool) ou bool, par défaut False
+        Si True, répartit proportionnellement les valeurs numériques des colonnes
+        en fonction du ratio d'aire lors des découpages géométriques.
+            - Si bool : appliqué à tous les datasets
+            - Si list(bool) : un par dataset, indique si ses colonnes doivent être réparties
+              proportionnellement lors des découpages ultérieurs
+
+    Returns
+    -------
+    result
+        Overlay des GeoDataFrame passés en argument.
+
+    """
+    # Application de proportional à tous les datasets
+    if isinstance(proportional, bool):
+        proportional = [proportional] * len(df_list)
+    # Suppression des géométries en double, ajout de suffixes aux colonnes
+    # pour tracer les données et éviter les erreurs dans gpd.overlay
+    source_dfs = []
+    for idx, gdf in enumerate(df_list):
+        unique_gdf = gdf.drop_duplicates(subset='geometry')
+        rename_dict = {col: f"{col}_{idx}" for col in unique_gdf.columns if col != 'geometry'}
+        renamed = unique_gdf.rename(columns=rename_dict)
+        source_dfs.append(renamed)
+    # Overlay source par source
+    result = source_dfs[0]
+    for i in range(1, len(source_dfs)):
+        # Stockage des aires originales pour les sources qui nécessitent
+        # une répartition proportionnelle
+        for source_idx in range(i):
+            if proportional[source_idx]:
+                source_cols = [col for col in result.columns if col.endswith(f'_{source_idx}')
+                               and not col.startswith('__')]
+                if source_cols:
+                    result[f'__area_original_{source_idx}'] = result.geometry.area
+        # Stockage des aires pour la nouvelle source si nécessaire
+        if proportional[i]:
+            source_dfs[i][f'__area_original_{i}'] = source_dfs[i].geometry.area
+        # Overlay
+        result = gpd.overlay(result, source_dfs[i],keep_geom_type=True)
+        # Application de la répartition proportionnelle pour toutes les sources
+        for source_idx in range(i + 1):
+            area_col = f'__area_original_{source_idx}'
+            if proportional[source_idx] and area_col in result.columns:
+                mask = result[area_col] > 0
+                if mask.any():
+                    result.loc[mask, '__ratio'] = result.loc[mask, 'geometry'].area / result.loc[mask, area_col]
+                    source_cols = [col for col in result.columns if col.endswith(f'_{source_idx}')]
+                    for col in source_cols:
+                        if pd.api.types.is_numeric_dtype(result[col]):
+                            result[col] = result[col].astype(float)
+                            result.loc[mask, col] = result.loc[mask, col] * result.loc[mask, '__ratio']
+                    result = result.drop(columns=['__ratio'])
+                result = result.drop(columns=[area_col])
+        # Suppression des artéfacts (très petits polygones)
+        if len(result) > 0:
+            result = result[result.geometry.area > 1]
+            result = result.reset_index(drop=True)
+    # Nettoyage des colonnes temporaires
+    result = result.drop(columns=[col for col in result.columns if col.startswith('__')])
+    return result
+
+def operate(datasets, names, operations, true_geom=False, pop_dataset=None, pop_variable='C21_PMEN'):
+    """
+    Applique les opérations fournies aux données fournies, dans l'ordre de priorité usuel.
+    Ne fonctionne qu'avec les 4 opérations de base
+    
+    Parameters
+    ----------
+    datasets : list(pd.DataFrame)
+        Jeux de données contenant les séries sur lesquelles appliquer les opérations.
+    names : list(str)
+        Noms des colonnes sur lesquelles appliquer les opérations
+    operations : list(str)
+        Opérations à appliquer, parmi les 4 opérations de base
+    true_geom : bool, optional
+        Si True, opération sur les localisations des données.
+        Si False, opération sur les indices.
+        Pas défaut, False.
+    pop_dataset : pd.geoDataFrame, optional
+        Jeu de données contenant la population, pour analyse statistique.
+        Par défaut, None.
+    pop_variable : str, optional
+        Nom de la colonne de pop_dataset contenant la variable de population à étudier.
+        Par défaut 'C21_PMEN' (population générale).
+    
+    Returns
+    -------
+    pd.Series
+        Série contenant le résultat des opérations fournies.
+    pd.Series : optional
+        Séries contenant la population, si pop=True
+
+    """
+    if true_geom:
+        # Construit la géométrie correspondant aux intersections de chaque géométrie,
+        # sans répétition pour éviter les artéfacts
+        if not pop_dataset is None: # Ajoute la population aux variables calculées
+            datasets.append(pop_dataset)
+        print("Préparation de la jointure des données : pour chaque variable, entrer :\n\
+              \r\t- 0 si c'est une grandeur intensive (à ne pas répartir, i.e. âge)\n\
+              \r\t- 1 si c'est une grandeur extensive (à répartir, i.e. population)")
+        proportional=[]
+        for name in names:
+            proportional.append(bool(input(f"{name} : ")))
+        if not pop_dataset is None:
+            proportional.append(True)
+        overlay_result = list_overlay(datasets, proportional)
+        # Construit l'expression arithmétique à partir des colonnes suffixées
+        expr_terms = []
+        for i, (name, op) in enumerate(zip(names, operations + [''])):
+            col_name = f"{name}_{i}"
+            if col_name in overlay_result.columns:
+                expr_terms.append(f"overlay_result['{col_name}']")
+            if op:
+                expr_terms.append(op)
+        
+        # Évalue l'expression
+        expression = ' '.join(expr_terms)
+        overlay_result['result'] = eval(expression)
+        if not pop_dataset is None:
+            overlay_result['population'] = overlay_result[f'{pop_variable}_{len(datasets)-1}']
+            return overlay_result[['result','population','geometry']]
+        else:
+            return overlay_result[['result','geometry']]
+    else:
+        series = [datasets[n][names[n]] for n in range(len(datasets))]
+        prio_dict={'*':1,'/':1,'+':2,'-':2}
+        op_dict={'*':operator.mul,
+                 '/':operator.truediv,
+                 '+':operator.add,
+                 '-':operator.sub}
+        ops_prio=[]
+        for op in operations:
+            ops_prio.append(prio_dict[op])
+        while len(operations)>0:
+            current_prio=max(ops_prio)
+            for n in range(len(operations)):
+                if ops_prio[n]==current_prio:
+                    op = op_dict[operations[n]]
+                    result = op(series[n], series[n+1])
+                    series[n] = result
+                    series.pop(n+1)
+                    operations.pop(n)
+                    ops_prio.pop(n)
+                    break # Une seule opération par parcours d'operations
+        return series[0]
+
+def intersect(datasets, names, levels, level_qs, level_dirs, methods=None,
+              true_geom=False, pop_dataset=None, pop_variable='POP21_POP'):
+    if methods is None:
+        methods = ['Intersection' for n in range(len(datasets)-1)]
+    if true_geom:
+        # Construit la géométrie correspondant aux intersections de chaque géométrie,
+        # sans répétition pour éviter les artéfacts
+        if not pop_dataset is None: # Ajoute la population aux variables calculées
+            datasets.append(pop_dataset)
+        print("Préparation de la jointure des données : pour chaque variable, entrer :\n\
+              \r\t- 0 si c'est une grandeur intensive (à ne pas répartir, i.e. âge)\n\
+              \r\t- 1 si c'est une grandeur extensive (à répartir, i.e. population)\n\
+              \rNote : les seuils en valeur sur des grandeurs extensives peuvent perdre leur sens")
+        proportional=[]
+        for name in names:
+            proportional.append(bool(input(f"{name} : ")))
+        if not pop_dataset is None:
+            proportional.append(True)
+        overlay_result = list_overlay(datasets, proportional)
+        # Pour chaque variable, remplace les valeurs par le nombre de seuils franchis
+        # Le sens de franchissement du seuil est spécifié dans level_dirs
+        for i, (name,level,level_q,level_dir) in enumerate(zip(names,levels,level_qs,level_dirs)):
+            if level_q == "Valeur":
+                true_level = np.array(level)[None,:]
+            else:
+                true_level = np.array([overlay_result[f"{name}_{i}"].quantile(lev) for lev in level])[None,:]
+            if level_dir == "Au-dessus du seuil":
+                counts = (overlay_result[f"{name}_{i}"].to_numpy()[:,None] >= true_level).sum(axis=1)
+            else:
+                counts = (overlay_result[f"{name}_{i}"].to_numpy()[:,None] <= true_level).sum(axis=1)
+            overlay_result[f"{name}_{i}"] = counts/counts.max()
+        # Calcul des unions (max) et intersections (min)
+            # Les unions sont prioritaires sur les intersections
+        if methods==['Intersection' for n in range(len(datasets)-1)]:
+            overlay_result['Résultat'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].min(axis=1)
+        elif methods==['Union' for n in range(len(datasets)-1)]:
+            overlay_result['Résultat'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].max(axis=1)
+        else:
+            temp_result=pd.DataFrame()
+            n=0
+            while n<len(methods):
+                if methods[n]=='Union':
+                    temp_result[f"{n}"] = pd.concat([overlay_result[f"{names[n]}_{n}"],overlay_result[f"{names[n+1]}_{n+1}"]],axis=1).max(axis=1)
+                    n+=1
+                else:
+                    temp_result[f"{n}"] = overlay_result[f"{names[n]}_{n}"]
+                n+=1
+                overlay_result['Résultat'] = temp_result.min(axis=1)
+        overlay_result = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]+['Résultat','geometry']]
+        overlay_result.columns = list(overlay_result.columns[:-2].str[:-2]) + ['Résultat', 'geometry']
+        return overlay_result
+    else:
+        series = [datasets[n][names[n]] for n in range(len(datasets))]
+        for i, (level,level_q,level_dir) in enumerate(zip(levels,level_qs,level_dirs)):
+            if level_q == "Valeur":
+                true_level = np.array(level)[None,:]
+            else:
+                true_level = np.array([series[i].quantile(lev) for lev in level])[None,:]
+            if level_dir == "Au-dessus du seuil":
+                counts = (series[i].to_numpy()[:,None] >= true_level).sum(axis=1)
+            else:
+                counts = (series[i].to_numpy()[:,None] <= true_level).sum(axis=1)
+            series[i] = pd.Series(counts/counts.max())
+        if methods==['Intersection' for n in range(len(datasets)-1)]:
+            intersection = pd.DataFrame(pd.concat(series,axis=1).min(axis=1))
+        elif methods==['Union' for n in range(len(datasets)-1)]:
+            intersection = pd.DataFrame(pd.concat(series,axis=1).max(axis=1))
+        else:
+            temp_result=pd.DataFrame()
+            n=0
+            while n<(len(methods)):
+                if methods[n]=='Union':
+                    temp_result[f"{n}"] = pd.concat([series[n],series[n+1]],axis=1).max(axis=1)
+                    n+=1
+                else:
+                    temp_result[f"{n}"] = series[n]
+                n+=1
+            intersection = temp_result.min(axis=1)
+        return intersection
+
+def build_variables(datasets,pop_dataset):
+    relations = input("Calcul de variables supplémentaires à partir des données existantes ? y/[n] ")
+    while relations not in ['y','n','']:
+        relations = input("Calcul de variables supplémentaires à partir des données existantes ? y/[n] ")
+    if relations =='y':
+        n_rel = safe_ask("Nombre de variables à calculer :\n", int)
+        rel=0
+        for rel in range(n_rel):
+            print(f"\nVariable composite n°{rel+1}\n{'-'*(22+(rel+1)//10)}")
+            new_var_name = input("Nom de la variable à créer :\n")
+            n_var = safe_ask("Nombre de variables source :\n",int)
+            method = select_list(methods,
+                                 query=f"Méthode de création de la variable :\n\
+                                     \r\t- {'\n\r\t- '.join(methods)}\n",
+                                 catch_dict=methods_entries)
+            true_geom_op = False
+            rel_sets = []
+            var_names = []
+            if method == "Indicateur synthétique":
+                operations = []
+                for var in range(n_var):
+                    rel_sets.append(
+                        datasets[select_list(
+                            list(datasets.keys()),
+                            f"Nom du jeu de données source n°{var+1} parmi :\n\
+                            \r\t- {'\n\r\t- '.join(list(datasets.keys()))}\n")])
+                    if rel_sets[0].shape[0]!=rel_sets[-1].shape[0]:
+                        true_geom_op=True
+                    var_names.append(
+                        select_list(
+                            rel_sets[-1].columns,
+                            f"Nom de la série de données n°{var+1} parmi :\n\
+                            \r\t- {'\n\r\t- '.join(rel_sets[-1].columns)}\n"))
+                    if var < n_var-1:
+                        operations.append(
+                            select_list(
+                                ['+','-','/','*'],
+                                f"Opération entre ce jeu et le suivant parmi {', '.join(['+','-','/','*'])}:\n"))
+                if not true_geom_op:
+                    new_var = operate(rel_sets, var_names, operations)
+                    rel_sets[0][new_var_name] = new_var
+                else:
+                    pop_variable = select_list(pop_dataset.columns[4:],
+                                               query=f"Nom de la variable de population à décrire parmi :\n\
+                                               \r\t- {'\n\r\t- '.join(pop_dataset.columns[4:])}\n")
+                    new_var = operate(rel_sets, var_names, operations,
+                                      true_geom=true_geom_op,
+                                      pop_dataset=pop_dataset,pop_variable=pop_variable)
+                    datasets[new_var_name] = gpd.GeoDataFrame(new_var)
+            elif method == "Intersection et union géographique":
+                inter_only = input("Approche par intersection uniquement ? [y]/n ")
+                if inter_only =='n':
+                    print("Note : L'union sera prioritaire sur l'intersection\n")
+                levels=[]
+                level_dirs=[]
+                level_qs=[]
+                inter=[]
+                for var in range(n_var):
+                    rel_sets.append(
+                        datasets[select_list(
+                            list(datasets.keys()),
+                            f"Nom du jeu de données source n°{var+1} parmi :\n\
+                            \r\t- {'\n\r\t- '.join(list(datasets.keys()))}\n")])
+                    if rel_sets[0].shape[0]!=rel_sets[-1].shape[0]:
+                        true_geom_op=True
+                    var_names.append(
+                        select_list(
+                            rel_sets[-1].columns,
+                            f"Nom de la série de données n°{var+1} parmi :\n\
+                            \r\t- {'\n\r\t- '.join(rel_sets[-1].columns)}\n"))
+                    level_qs.append(select_list(level_method,
+                                          query=f"Méthode de sélection du seuil :\n\
+                                          \r\t- {'\n\r\t- '.join(level_method)}\n"))
+                    level_n = safe_ask("Nombre de seuils : ", int)
+                    level=[]
+                    for n in range(level_n):
+                        level.append(safe_ask(f"Valeur du seuil {n+1} : ", float))
+                    level_dirs.append(select_list(level_dir_list,
+                                                  query="Valeurs représentant la contrainte :\n\
+                                                      \r\t- Au-dessus des seuils (1)\n\
+                                                      \r\t- En-dessous des seuils (0)\n",
+                                                  catch_dict=level_dir_entries))
+                    levels.append(level)
+                    if var!=n_var-1:
+                        if inter_only!='n':
+                            inter.append('Intersection')
+                        else:
+                            inter.append(select_list(inter_methods,
+                                                     query="Mode de liaison avec le jeu suivant :\n\
+                                                         \r\t- Intersection (1)\n\
+                                                         \r\t- Union (0)\n",
+                                                     catch_dict=inter_methods_entries))
+                if not true_geom_op:
+                    new_var = intersect(rel_sets, var_names, levels, level_qs, level_dirs)
+                    rel_sets[0][new_var_name] = new_var
+                else:
+                    pop_variable = select_list(pop_dataset.columns[4:],
+                                               query=f"Nom de la variable de population à décrire parmi :\n\
+                                               \r\t- {'\n\r\t- '.join(pop_dataset.columns[4:])}\n")
+                    new_var = intersect(rel_sets, var_names, levels, level_qs, level_dirs,
+                                        true_geom=true_geom_op,
+                                        pop_dataset=pop_dataset, pop_variable=pop_variable)
+                    datasets[new_var_name] = gpd.GeoDataFrame(new_var)
+    return datasets
+
+#TODO : gestion d'erreur sur les palettes de couleur
+def ask_carto(datasets,pop_dataset):
+    """
+    Demande à l'utilisateur les variables à afficher, ainsi que les caractéristiques de l'affichage.
+    
+    Parameters
+    ----------
+    datasets : dict(pd.DataFrame)
+        Dictionnaire contenant les données à afficher.
+    pop_dataset : gpd.GeoDataFrame
+        Donées sur la répartition de population, pour traitement
+    
+    Returns
+    -------
+    variables : dict(list(int,list(dict(str,dict)))
+        Pour chaque jeu de données,
+            Nombre de variables à afficher,
+            Liste des variables à afficher,
+                Nom de la variable,
+                Type de la variable,
+                Colorisation de l'affichage.
+    
+    """
+    variables = dict(zip(datasets.keys(),[[0,[]] for n in range(len(datasets))])) # Création du contenant des données de sortie
+    for dataset in variables:
+        print(f"\n{dataset}\n{'-'*len(dataset)}\n")
+        variables[dataset][0] = safe_ask("Nombre de variables à afficher :\n",int)
+        for n_var in range(variables[dataset][0]):
+            print(f"\nVariable n°{n_var+1}\n{'-'*(12+(n_var+1)//10)}")
+            var={}
+            var['nom'] = select_list(datasets[dataset].columns,
+                f"Nom de la série de données parmi :\n\
+                \r\t- {'\n\r\t- '.join(datasets[dataset].columns)}\n")
+            var['nom_legende'] = input("Nom de variable à inscrire sur la carte :\n").replace('\\n','\n')
+            var['type'] = select_list(data_types,
+                f"Type des données parmi :\n\
+                \r\t- {'\n\r\t- '.join(data_types)}\n")
+            if var['type'] in cmap_data:
+                var['classification'] = select_list(
+                    list(cmap_classification.keys()),
+                    f"Type de classification parmi :\n\
+                    \r\t- {'\n\r\t- '.join(cmap_classification.keys())}\n",
+                    catch_dict=cmap_classification_entries)
+                var['classification'] = cmap_classification[var['classification']]
+                if var['classification'] == 'UserDefined':
+                    n_bins = safe_ask("Nombre de classes : ", int)
+                    var['bins'] = [safe_ask("Borne inférieure de la première classe : ", float)]
+                    for i_bin in range(n_bins-1):
+                        var['bins'].append(safe_ask(f"Borne supérieure de la classe n°{i_bin+1} : ", float))
+                    var['bins'].append(int(np.ceil(datasets[dataset][var['nom']].max())))
+                    var['bins'] = dict(bins=var['bins'][1:],lowest=var['bins'][0])
+                elif var['classification'] in ['FisherJenks']:
+                    var['bins'] = dict(k=safe_ask("Nombre de classes : ", int))
+                elif var['classification'] == None:
+                    var['labels'] = []
+                    var['labels'].append(input('Légende : étiquette pour les valeurs faibles :\n'))
+                    var['labels'].append(input('Légende : étiquette pour les valeurs élevées :\n'))
+                var['couleur'] = input(
+                    "Palette de couleurs :\n\
+                    \rPalettes standard :\n\
+                    \r\t- YlOrRd\n\r\t- coolwarm ou RdBu\n\
+                    \r\t- RdYlGn_corr ou GnYlRd_corr\n")
+            else :
+                var['couleur'] = safe_ask(
+                    "Couleur :\n", is_color_like)
+            variables[dataset][1].append(var)
+    return variables
