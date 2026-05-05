@@ -36,7 +36,9 @@ geom_columns_dict = {'dep':['département','departement','dép','dep',
 # Noms de colonnes des géométries de référence
 geom_grid_dict = {'dep':'code','com':'code_insee','iris':'code_iris',
                   'maille_safran':'maille_safran','maille_drias':'maille_drias'}
-
+# Noms de colonnes canoniques, utilisés pour les aggrégations
+expected_admin_columns = {'code_iris':'iris','code_insee':'com','EPCI':'epci','DEP':'dep'}
+expected_geom_columns = {'maille_safran','maille_drias','id_car'}
 # Type de données affichables
 data_types = ['Densité','Score','Compte','Localisation de points','Tracés']
 cmap_data = ['Densité','Score']
@@ -51,6 +53,7 @@ cmap_classification_entries={'aucune':'Aucune','none':'Aucune',
 file_list = [x for x in Path(r"Données traitées").glob("**/*") if x.is_file()]
 for georef in (Path(r"Données traitées\Région.gpkg"),
                Path(r"Données traitées\Départements.gpkg"),
+               Path(r"Données traitées\EPCI.gpkg"),
                Path(r"Données traitées\Communes.gpkg"),
                Path(r"Données traitées\IRIS.gpkg"),
                Path(r"Données traitées\Pays limitrophes.gpkg"),
@@ -84,9 +87,9 @@ level_dir_entries = {'1':"Au-dessus du seuil",'0':"En-dessous du seuil"}
 # Échelles d'affichage
 admin_scales = {'département':['epci','com','iris'],'epci':['com','iris'],'commune':['iris'],'iris':None}
 admin_scales_entries = {'dep':'département',
-                        'com':'Commune'}
+                        'com':'commune'}
 admin_scales_names = {'département':'DEP','epci':'EPCI','commune':'code_insee','iris':'code_iris'}
-
+admin_scales_size = {'dep':4,'epci':3,'com':2,'iris':1}
 
 def safe_ask(query,datatype):
     """
@@ -230,7 +233,7 @@ def import_progress(filepath, treatment=None, compact=True):
                         sys.stdout.write(f"\rImportation... {percent}% ({i}/{total})")
                     sys.stdout.flush()
         data = gpd.GeoDataFrame.from_features(features, crs=src.crs)
-        data.attrs['name'] = filepath
+        data.attrs['name'] = filepath.stem
         if not compact:
             print("\nImportation terminée !", flush=True)
         return data
@@ -246,7 +249,7 @@ def import_progress(filepath, treatment=None, compact=True):
         # Efface la ligne avant de commencer
         sys.stdout.write("\x1b[1K\r")
         # Importation des données par bloc et comptage
-        for chunk in pd.read_csv(filepath, chunksize=chunk_size, dtype='str'):
+        for chunk in pd.read_csv(filepath, chunksize=chunk_size, dtype='string'):
             chunks.append(chunk)
             read_rows += len(chunk)
             percent = int((read_rows / total) * 100)
@@ -258,7 +261,7 @@ def import_progress(filepath, treatment=None, compact=True):
                     sys.stdout.write(f"\rImportation... {percent}% ({read_rows}/{total})")
                 sys.stdout.flush()
         data = pd.concat(chunks, ignore_index=True)
-        data.attrs['name'] = filepath
+        data.attrs['name'] = filepath.stem
         data.loc[:,data.columns.str.endswith('_data')]=data.loc[:,data.columns.str.endswith('_data')].apply(pd.to_numeric).convert_dtypes()
         if treatment == 'MeanRatio':
             for column in data.columns[data.columns.str.endswith('_data')]:
@@ -307,10 +310,10 @@ def import_fast(filepath, treatment=None, compact=True):
         elif treatment == 'MedianRatio':
             for column in data.columns.drop('geometry'):
                 data[column] = data[column]/data[column].median()
-        data.attrs['name'] = filepath
+        data.attrs['name'] = filepath.stem
         return data
     elif filepath.suffix=='.csv':
-        data = pd.read_csv(filepath, dtype='str')
+        data = pd.read_csv(filepath, dtype='string')
         for col in data.columns[data.columns.str.endswith('_data')]:
             data[col] = pd.to_numeric(data[col])
         if treatment == 'MeanRatio':
@@ -320,7 +323,7 @@ def import_fast(filepath, treatment=None, compact=True):
             for column in data.columns[data.columns.str.endswith('_data')]:
                 data[column] = data[column]/data[column].median()
         data.columns = data.columns.str.removesuffix('_data')
-        data.attrs['name'] = filepath
+        data.attrs['name'] = filepath.stem
         return data
     else:
         raise TypeError(f"Format de données non supporté. Formats valides :\n\
@@ -518,99 +521,10 @@ def search_geom(geom_grid, data, geom_data=None):
                      \r\t- {'\n\r\t- '.join(columns)}\n")
         return search_geom(geom_grid, data, geom_data)
 
-def weighted_mean(series,pop_dataset=None,pop_variable=None):
-    """
-    Moyenne pondérée par la population
-
-    Parameters
-    ----------
-    series : pd.Series
-        Données à moyenner.
-    pop_dataset : pd.DataFrame, optional
-        Répartition de la population. Par défaut, None.
-    pop_variable : str, optional
-        Nom de la variable contenant la population. Par défaut, None.
-
-    Returns
-    -------
-    float
-        Moyenne pondérée par la population.
-
-    """
-    weights = pop_dataset.loc[series.index, pop_variable]
-    return (series * weights).sum() / weights.sum()
-
-admin_scale_aggfuncs = {'Somme':'sum','Moyenne pondérée':weighted_mean,'Suppression':None}
-admin_scale_aggfuncs_entries = {'sum':'Somme',
-                                'mean':'Moyenne pondérée','wmean':'Moyenne pondérée','moy':'Moyenne pondérée',
-                                'del':'Suppression'}
-def aggregate(dfs,min_scale,corr_table,pop_dataset,geoms):
-    """
-    Agrège les données fournies à un échelon administratif de taille fournie.
-    Si les données sont déjà à un niveau agrégé, les retourne telles quelles
-
-    Parameters
-    ----------
-    dfs : dict
-        Données d'entrée.
-    min_scale : str
-        Échelle d'agrégation.
-    corr_table : pd.DataFrame
-        Corespndance entre les échelles administratives.
-    pop_dataset : pd.DataFrame
-        Répartition de la population, pour calcul de l'agrégation.
-    geoms : list(tuple)
-        Liste des colonnes contenant les géométries des données d'entrée.
-
-    Returns
-    -------
-    dict
-        Données agrégées.
-
-    """
-    if min_scale=='iris':
-        return dfs
-    agg_df_list=[]
-    pop_dataset = pop_dataset.join(corr_table.set_index('code_iris'), on='code_iris')
-    pop_dataset = pop_dataset[['code_iris','code_insee','EPCI','DEP','P21_POP']]
-    n=0
-    for df_name in dfs:
-        if dfs[df_name].attrs['scale'] in admin_scales[min_scale]:
-            attrs = dfs[df_name].attrs
-            print(df_name)
-            print('-'*len(df_name))
-            df=dfs[df_name]
-            # Agrégation de la population à l'échelle des données pour traitement
-            pop_dataset_ = pop_dataset.set_index('code_iris').groupby(admin_scales_names[df.attrs['scale']]).sum()
-            # Demande des fonctions pour l'agrégation des données
-            aggfuncs={}
-            for col in df.columns:
-                if col!=geoms[n][1]:
-                    aggfunc = select_list(list(admin_scale_aggfuncs),
-                                          query=f"{col} :\nMéthode d'agrégation des données :\n\
-                                              \r\t- {'\n\r\t- '.join(list(admin_scale_aggfuncs))}\n",
-                                          catch_dict=admin_scale_aggfuncs_entries)
-                    if aggfunc=='Moyenne pondérée':
-                        aggfuncs.update({col: lambda s: weighted_mean(s, pop_dataset=pop_dataset_, pop_variable='P21_POP')})
-                    elif aggfunc=='Suppression':
-                        df = df.drop(col, axis=1)
-                    else:
-                        aggfuncs.update({col:admin_scale_aggfuncs[aggfunc]})
-            new_df = df.set_index(geoms[n][1]).groupby(by=corr_table.set_index(admin_scales_names[df.attrs['scale']])[admin_scales_names[min_scale]])
-            new_df = new_df.agg(func=aggfuncs).reset_index()
-            new_df.attrs = attrs
-            new_df.attrs.update({'scale':min_scale})
-            agg_df_list.append(new_df)
-        else:
-            agg_df_list.append(dfs[df_name])
-        n+=1
-    agg_dfs = dict(zip(dfs.keys(),agg_df_list))
-    return agg_dfs
-
 def list_overlay(df_list,proportional=False):
     """
     Réalise un overlay des GeoDataFrame passés en argument.
-    Gère la répétition des géométries en fusionnant les données basées sur la même géométrie,
+    Gère la répétition des géométries par suppression des doublons,
     avant l'appel de gpd.overlay
 
     Parameters
@@ -623,12 +537,12 @@ def list_overlay(df_list,proportional=False):
             - Si bool : appliqué à tous les datasets
             - Si list(bool) : un par dataset, indique si ses colonnes doivent être réparties
               proportionnellement lors des découpages ultérieurs
-
+    
     Returns
     -------
     result
         Overlay des GeoDataFrame passés en argument.
-
+    
     """
     # Application de proportional à tous les datasets
     if isinstance(proportional, bool):
@@ -636,10 +550,17 @@ def list_overlay(df_list,proportional=False):
     # Suppression des géométries en double, ajout de suffixes aux colonnes
     # pour tracer les données et éviter les erreurs dans gpd.overlay
     source_dfs = []
+    admin_size = 'dep'
+    admin_mixed = False
     for idx, gdf in enumerate(df_list):
         unique_gdf = gdf.drop_duplicates(subset='geometry')
         rename_dict = {col: f"{col}_{idx}" for col in unique_gdf.columns if col != 'geometry'}
-        renamed = unique_gdf.rename(columns=rename_dict)
+        renamed = unique_gdf.rename(rename_dict, axis=1)
+        if gdf.attrs['scale'] in admin_scales_size:
+            if admin_scales_size[gdf.attrs['scale']] < admin_scales_size[admin_size]:
+                admin_size = gdf.attrs['scale']
+        else:
+            admin_mixed = True
         source_dfs.append(renamed)
     # Overlay source par source
     result = source_dfs[0]
@@ -676,12 +597,13 @@ def list_overlay(df_list,proportional=False):
             result = result[result.geometry.area > 1]
             result = result.reset_index(drop=True)
     # Nettoyage des colonnes temporaires
-    result = result.drop(columns=[col for col in result.columns if col.startswith('__')])
+    result = result.drop([col for col in result.columns if col.startswith('__')], axis=1)
+    result.attrs = {'scale':admin_size,'admin_mixed':admin_mixed}
     return result
 
 def operate(datasets, names, operations, true_geom=False, pop_dataset=None, pop_variable='C21_PMEN'):
     """
-    Applique les opérations fournies aux données fournies, dans l'ordre de priorité usuel.
+    Calcule le résultat des opérations fournies sur les données fournies, dans l'ordre de priorité usuel.
     Ne fonctionne qu'avec les 4 opérations de base
     
     Parameters
@@ -721,7 +643,7 @@ def operate(datasets, names, operations, true_geom=False, pop_dataset=None, pop_
               \r\t- 1 si c'est une grandeur extensive (à répartir, i.e. population)")
         proportional=[]
         for name in names:
-            proportional.append(bool(input(f"{name} : ")))
+            proportional.append(bool(int(input(f"{name} : "))))
         if not pop_dataset is None:
             proportional.append(True)
         overlay_result = list_overlay(datasets, proportional)
@@ -733,15 +655,28 @@ def operate(datasets, names, operations, true_geom=False, pop_dataset=None, pop_
                 expr_terms.append(f"overlay_result['{col_name}']")
             if op:
                 expr_terms.append(op)
-        
         # Évalue l'expression
         expression = ' '.join(expr_terms)
         overlay_result['result'] = eval(expression)
+        # Colonnes d'indicateur géographique pour aggrégation éventuelle, premières d'un dataset par construction
+        cols_to_keep = [overlay_result.columns[0]]
+        for col in list(overlay_result.columns)[:-2]:
+            if col[-1]!=cols_to_keep[-1][-1]:
+                cols_to_keep.append(col)
         if not pop_dataset is None:
             overlay_result['population'] = overlay_result[f'{pop_variable}_{len(datasets)-1}']
-            return overlay_result[['result','population','geometry']]
+            overlay_result = overlay_result[cols_to_keep+['result','population','geometry']]
+            overlay_result = overlay_result.rename(
+                dict(zip(cols_to_keep,[col[:-2] for col in cols_to_keep])),axis=1)
+            # Suppression des doublons
+            overlay_result = overlay_result.loc[:,~overlay_result.columns.duplicated()]
+            return overlay_result
         else:
-            return overlay_result[['result','geometry']]
+            overlay_result = overlay_result[cols_to_keep+['result','geometry']]
+            overlay_result = overlay_result.rename(
+                dict(zip(cols_to_keep,[col[:-2] for col in cols_to_keep])),axis=1)
+            overlay_result = overlay_result.loc[:,~overlay_result.columns.duplicated()]
+            return overlay_result
     else:
         series = [datasets[n][names[n]] for n in range(len(datasets))]
         prio_dict={'*':1,'/':1,'+':2,'-':2}
@@ -780,11 +715,11 @@ def intersect(datasets, names, levels, level_qs, level_dirs, methods=None,
               \rNote : les seuils en valeur sur des grandeurs extensives peuvent perdre leur sens")
         proportional=[]
         for name in names:
-            proportional.append(bool(input(f"{name} : ")))
+            proportional.append(bool(int(input(f"{name} : "))))
         if not pop_dataset is None:
             proportional.append(True)
         overlay_result = list_overlay(datasets, proportional)
-        # Pour chaque variable, remplace les valeurs par le nombre de seuils franchis
+        # Pour chaque variable, remplace les valeurs par la proportion de seuils franchis
         # Le sens de franchissement du seuil est spécifié dans level_dirs
         for i, (name,level,level_q,level_dir) in enumerate(zip(names,levels,level_qs,level_dirs)):
             if level_q == "Valeur":
@@ -799,9 +734,9 @@ def intersect(datasets, names, levels, level_qs, level_dirs, methods=None,
         # Calcul des unions (max) et intersections (min)
             # Les unions sont prioritaires sur les intersections
         if methods==['Intersection' for n in range(len(datasets)-1)]:
-            overlay_result['Résultat'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].min(axis=1)
+            overlay_result['result'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].min(axis=1)
         elif methods==['Union' for n in range(len(datasets)-1)]:
-            overlay_result['Résultat'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].max(axis=1)
+            overlay_result['result'] = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]].max(axis=1)
         else:
             temp_result=pd.DataFrame()
             n=0
@@ -812,9 +747,26 @@ def intersect(datasets, names, levels, level_qs, level_dirs, methods=None,
                 else:
                     temp_result[f"{n}"] = overlay_result[f"{names[n]}_{n}"]
                 n+=1
-                overlay_result['Résultat'] = temp_result.min(axis=1)
-        overlay_result = overlay_result[[f"{name}_{i}" for i,name in enumerate(names)]+['Résultat','geometry']]
-        overlay_result.columns = list(overlay_result.columns[:-2].str[:-2]) + ['Résultat', 'geometry']
+                overlay_result['result'] = temp_result.min(axis=1)
+        # Sélection des colonnes utiles
+        # Colonnes d'indicateur géographique pour aggrégation éventuelle, premières d'un dataset par construction
+        cols_to_keep = [overlay_result.columns[0]]
+        for col in list(overlay_result.columns)[:-2]:
+            if col[-1]!=cols_to_keep[-1][-1]:
+                cols_to_keep.append(col)
+        if not pop_dataset is None:
+            overlay_result['population'] = overlay_result[f'{pop_variable}_{len(datasets)-1}']
+            overlay_result = overlay_result[cols_to_keep+['result','population','geometry']]
+            overlay_result = overlay_result.rename(
+                dict(zip(cols_to_keep,[col[:-2] for col in cols_to_keep])),axis=1)
+            # Suppression des doublons
+            overlay_result = overlay_result.loc[:,~overlay_result.columns.duplicated()]
+            return overlay_result
+        else:
+            overlay_result = overlay_result[cols_to_keep+['result','geometry']]
+            overlay_result = overlay_result.rename(
+                dict(zip(cols_to_keep,[col[:-2] for col in cols_to_keep])),axis=1)
+            overlay_result = overlay_result.loc[:,~overlay_result.columns.duplicated()]
         return overlay_result
     else:
         series = [datasets[n][names[n]] for n in range(len(datasets))]
@@ -893,7 +845,12 @@ def build_variables(datasets,pop_dataset):
                     new_var = operate(rel_sets, var_names, operations,
                                       true_geom=true_geom_op,
                                       pop_dataset=pop_dataset,pop_variable=pop_variable)
-                    datasets[new_var_name] = gpd.GeoDataFrame(new_var)
+                    attrs = new_var.attrs
+                    new_var = new_var.rename({'result':new_var_name}, axis=1)
+                    new_var = gpd.GeoDataFrame(new_var)
+                    attrs.update({'name':new_var_name})
+                    new_var.attrs = attrs
+                    datasets[new_var_name] = new_var
             elif method == "Intersection et union géographique":
                 inter_only = input("Approche par intersection uniquement ? [y]/n ")
                 if inter_only =='n':
@@ -947,8 +904,148 @@ def build_variables(datasets,pop_dataset):
                     new_var = intersect(rel_sets, var_names, levels, level_qs, level_dirs,
                                         true_geom=true_geom_op,
                                         pop_dataset=pop_dataset, pop_variable=pop_variable)
-                    datasets[new_var_name] = gpd.GeoDataFrame(new_var)
+                    attrs = new_var.attrs
+                    new_var = new_var.rename({'result':new_var_name}, axis=1)
+                    new_var = gpd.GeoDataFrame(new_var)
+                    attrs.update({'name':new_var_name})
+                    new_var.attrs = attrs
+                    datasets[new_var_name] = new_var
+        datasets = build_variables(datasets, pop_dataset)
     return datasets
+
+def weighted_mean(series,pop_dataset=None,pop_variable=None):
+    """
+    Moyenne pondérée par la population
+
+    Parameters
+    ----------
+    series : pd.Series
+        Données à moyenner.
+    pop_dataset : pd.DataFrame, optional
+        Répartition de la population. Par défaut, None.
+    pop_variable : str, optional
+        Nom de la variable contenant la population. Par défaut, None.
+
+    Returns
+    -------
+    float
+        Moyenne pondérée par la population.
+
+    """
+    weights = pop_dataset.loc[series.index, pop_variable]
+    return (series * weights).sum() / weights.sum()
+
+admin_scale_aggfuncs = {'Somme':'sum','Moyenne pondérée':weighted_mean,'Suppression':None}
+admin_scale_aggfuncs_entries = {'sum':'Somme',
+                                'mean':'Moyenne pondérée','wmean':'Moyenne pondérée','moy':'Moyenne pondérée',
+                                'del':'Suppression'}
+def aggregate(dfs,min_scale,corr_admin,pop_dataset,geoms):
+    """
+    Agrège les données fournies à un échelon administratif de taille fournie.
+    Si les données sont déjà à un niveau agrégé, les retourne telles quelles
+
+    Parameters
+    ----------
+    dfs : dict
+        Données d'entrée.
+    min_scale : str
+        Échelle d'agrégation.
+    corr_table : list(pd.DataFrame,dict(gpd.GeoDataFrame))
+        Corespondance entre les échelles administratives et géométries administratives
+    pop_dataset : pd.DataFrame
+        Répartition de la population, pour calcul de l'agrégation.
+    geoms : list(tuple)
+        Liste des colonnes contenant les géométries des données d'entrée.
+
+    Returns
+    -------
+    dict
+        Données agrégées.
+
+    """
+    if min_scale=='iris':
+        return dfs
+    corr_table = corr_admin[0]
+    agg_df_list = []
+    pop_dataset = pop_dataset.drop(columns='code_insee').join(corr_table.set_index('code_iris'), on='code_iris')
+    pop_dataset = pop_dataset[['code_iris','code_insee','EPCI','DEP','P21_POP']]
+    n=0
+    for df_name in dfs:
+        if dfs[df_name].attrs['scale'] in admin_scales[min_scale]:
+            attrs = dfs[df_name].attrs
+            print(df_name)
+            print('-'*len(df_name))
+            df=dfs[df_name]
+            # Agrégation de la population à l'échelle des données pour traitement
+            pop_dataset_ = pop_dataset.set_index('code_iris').groupby(admin_scales_names[df.attrs['scale']]).sum()
+            # Demande des fonctions pour l'agrégation des données
+            aggfuncs={}
+            for col in df.columns:
+                if col!=geom_grid_dict[attrs['scale']]\
+                and not col in expected_admin_columns\
+                and not col in expected_geom_columns\
+                and col!='geometry' :
+                    aggfunc = select_list(list(admin_scale_aggfuncs),
+                                          query=f"{col} :\nMéthode d'agrégation des données :\n\
+                                              \r\t- {'\n\r\t- '.join(list(admin_scale_aggfuncs))}\n",
+                                          catch_dict=admin_scale_aggfuncs_entries)
+                    if aggfunc=='Moyenne pondérée':
+                        aggfuncs.update({col: lambda s: weighted_mean(s, pop_dataset=pop_dataset_, pop_variable='P21_POP')})
+                    elif aggfunc=='Suppression':
+                        df = df.drop(col, axis=1)
+                    else:
+                        aggfuncs.update({col:admin_scale_aggfuncs[aggfunc]})
+                elif col!=geom_grid_dict[attrs['scale']]\
+                and col in expected_admin_columns\
+                and col!='geometry':
+                    df = df.drop(col, axis=1)
+            # Agrégation
+            if not df.attrs.get('admin_mixed',False):
+                # Géométrie selon un découpage administratif
+                # Suppression de la géométrie pour travail uniquement en indice
+                df = df.drop('geometry',axis=1)
+                new_df = df.set_index(geom_grid_dict[attrs['scale']]).groupby(by=corr_table.set_index(admin_scales_names[df.attrs['scale']])[admin_scales_names[min_scale]])
+                new_df = new_df.agg(func=aggfuncs)
+                # Mise à jour de la géométrie
+                new_df = new_df.join(corr_admin[1][min_scale].set_index(admin_scales_names[min_scale])['geometry'])
+                # Passage au format GeoDataFrame
+                new_df = gpd.GeoDataFrame(new_df,geometry='geometry')
+                # Mise à jour des métadonnées
+                new_df.attrs = attrs
+                new_df.attrs.update({'scale':min_scale})
+                agg_df_list.append(new_df)
+            else:
+                # Géométrie selon un découpage mixte
+                # Récupération des indicateurs géographiques pertinents
+                admincolumns = []
+                geocolumns = []
+                min_admin_scale='dep'
+                for col in df.columns:
+                    if col in expected_admin_columns:
+                        # Indicateur administratif le plus fin possible
+                        admincolumns.append(col)
+                        if admin_scales_size[expected_admin_columns[col]]<=admin_scales_size[min_admin_scale]:
+                            min_admin_col = col
+                            min_admin_scale = expected_admin_columns[col]
+                    elif col in expected_geom_columns:
+                        # Indicateurs non administratifs
+                        geocolumns.append(col)
+                # Suppression des indicateurs géographiques non pertinents
+                admincolumns.remove(min_admin_col)
+                new_df = df.drop(columns=admincolumns)
+                # Appariement à la table de correspondance
+                new_df = new_df.set_index(min_admin_col).join(corr_table[[min_admin_col,admin_scales_names[min_scale]]].set_index(min_admin_col))
+                geocolumns.append(admin_scales_names[min_scale])
+                # Agrégation
+                new_df = new_df.dissolve(by=geocolumns, aggfunc=aggfuncs, as_index=False)
+                new_df.attrs = attrs
+                new_df.attrs.update({'scale':min_scale})
+                agg_df_list.append(new_df)
+        else:
+            agg_df_list.append(dfs[df_name])
+        n+=1
+    agg_dfs = dict(zip(dfs.keys(),agg_df_list))
+    return agg_dfs
 
 #TODO : gestion d'erreur sur les palettes de couleur
 def ask_carto(datasets,pop_dataset):

@@ -265,7 +265,7 @@ def wrap_text_to_width(ax, text, required_width, fontsize=12, **text_kwargs):
     lines = []
     current_line = ""
     for token in tokens:
-        # Regard si la ligne devient trop longue, change de ligne si oui
+        # Regarde si la ligne devient trop longue, change de ligne si oui
         test_line = current_line + token
         t = ax.text(
             0, 0, test_line,
