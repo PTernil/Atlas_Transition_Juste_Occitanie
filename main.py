@@ -58,6 +58,7 @@ print("\nImportation des références géographiques...", flush=True)
 grids={
 'reg' : import_function(r"Données traitées\Région.gpkg"),
 'dep' : import_function(r"Données traitées\Départements.gpkg"),
+'epci' : import_function(r"Données traitées\EPCI.gpkg"),
 'com' : import_function(r"Données traitées\Communes.gpkg"),
 'iris' : import_function(r"Données traitées\IRIS.gpkg"),
 'pays_v' : import_function(r"Données traitées\Pays limitrophes.gpkg"),
@@ -68,8 +69,9 @@ grids={
 }
 # Importation des données de répartition de la population, pour traitement des autres données
 pop_dataset = import_function(r"Données traitées\Population_2021_iris.csv", compact=True)
-pop_dataset = grids['iris'].join(pop_dataset.set_index('IRIS'),
+pop_dataset = grids['iris'].join(pop_dataset.set_index('code_iris'),
                                  on='code_iris', how="left", lsuffix='_grid').convert_dtypes()
+pop_dataset.attrs = {'name':'Base_Population','scale':'iris'}
 print("Importation terminée.", flush=True)
 print("Extraction des préfectures et sous-préfectures...", flush=True)
 prefs={
@@ -77,17 +79,6 @@ prefs={
 's_pref' : grids['com'].loc[grids['com']['sous-prefecture']==True,['geometry','code_insee','nom_commune']]
 }
 print("Extraction terminée.", flush=True)
-
-# Aggrégation à un niveau supérieur pour clarté d'affichage, si nécessaire
-corr_admin = import_function(r"Données traitées\Correspondance_echelle_admin.csv")
-min_admin_scale = imp.select_list(list(imp.admin_scales),
-                                  query = f"Échelle d'affichage parmi :\n\
-                                  \r\t- {'\n\r\t- '.join(list(imp.admin_scales))}\n",
-                                  catch_dict=imp.admin_scales_entries)
-datasets = imp.aggregate(datasets,min_admin_scale,corr_admin,pop_dataset,geoms)
-for n in range(len(geoms)):
-    if geoms[n][0] in imp.admin_scales[min_admin_scale]:
-        geoms[n] = (imp.geom_dict[min_admin_scale],imp.geom_grid_dict[imp.geom_dict[min_admin_scale]])
 
 # Raccordement des données à la grille géographique de référence
 # Pour les données à géographie interne, vérification du système de projection
@@ -110,9 +101,25 @@ for n in range(len(datasets)):
             print("Terminé.")
 # %% variables
 
-
-# Définition des variables à calculer et afficher
+# TODO: aggregate après calcul variables, qui agrège sur inter(niveau admin,autre) si autre
+# Définition des variables à calculer
 datasets = imp.build_variables(datasets,pop_dataset)
+
+# Aggrégation à un niveau supérieur pour clarté d'affichage, si nécessaire
+corr_admin = import_function(r"Données traitées\Correspondance_echelle_admin.csv")
+corr_admin = [corr_admin,{'département':grids['dep'][['code','geometry']],
+                          'epci':grids['epci'][['EPCI','geometry']],
+                          'commune':grids['com'][['code_insee','geometry']]}]
+min_admin_scale = imp.select_list(list(imp.admin_scales),
+                                  query = f"Échelle d'affichage parmi :\n\
+                                  \r\t- {'\n\r\t- '.join(list(imp.admin_scales))}\n",
+                                  catch_dict=imp.admin_scales_entries)
+datasets = imp.aggregate(datasets,min_admin_scale,corr_admin,pop_dataset,geoms)
+for n in range(len(geoms)):
+    if geoms[n][0] in imp.admin_scales[min_admin_scale]:
+        geoms[n] = (imp.geom_dict[min_admin_scale],imp.geom_grid_dict[imp.geom_dict[min_admin_scale]])
+# %% Paramétrage de l'affichage
+
 print("Sélection des variables à afficher\n\
       \r----------------------------------")
 variables = imp.ask_carto(datasets,pop_dataset)
@@ -131,8 +138,8 @@ source = "                "+input("Source(s) des données :\n")
     # TODO: datatype hors cmap
     # TODO: encadrés de lecture dans la carte à la main de l'utilisateur
     # TODO: offer possibility to normalise by area
-# %%
-# Affichage
+# %% Affichage
+
 # Création de la figure
 print("Création de la carte...")
 fig, ax = plt.subplots(figsize=(60, 40))

@@ -63,6 +63,8 @@ cfm_2021.drop(columns=list(poids_pcs.keys()))
 cfm_2021["P_21_PVUL_CHAL"]=cfm_2021["P21_POP5579"]*5/25\
                            +cfm_2021["P21_POP80P"]
 
+# Rebaptême des colonnes d'indicateurs géographiques
+cfm_2021 = cfm_2021.rename(columns={'IRIS':'code_iris','COM':'code_insee'})
 # Rebaptême des colonnes pour inférence du type à la lecture
 cfm_2021 = cfm_2021.rename(columns=dict(zip(cfm_2021.columns[2:],[cfm_2021.columns[n]+"_data"for n in range(2,cfm_2021.shape[1])])))
 
@@ -80,6 +82,8 @@ pop_insee = pop_insee.loc[np.isin(pop_insee["IRIS"],iris_occitanie)]
 pop_insee = pop_insee.loc[:,['IRIS','COM','P21_POP','P21_POP0002','P21_POP0305','P21_POP6074','P21_POP75P']]
 pop_insee[pop_insee.columns[2:]]=pop_insee.iloc[:,2:].apply(pd.to_numeric)
 pop_insee["P_21_PVUL_CHAL"]=pop_insee["P21_POP0002"]+pop_insee["P21_POP0002"]*2/3+pop_insee["P21_POP75P"]
+# Rebaptême des colonnes d'indicateurs géographiques
+pop_insee = pop_insee.rename(columns={'IRIS':'code_iris','COM':'code_insee'})
 # Rebaptême des colonnes pour inférence du type à la lecture
 pop_insee = pop_insee.rename(columns=dict(zip(pop_insee.columns[2:],[pop_insee.columns[n]+"_data"for n in range(2,pop_insee.shape[1])])))
 pop_insee.to_csv(r"Données traitées\Population_2021_IRIS.csv", index=False)
@@ -97,6 +101,8 @@ for n_column in range(1,chaleur_insee.shape[1]):
 chaleur_insee.columns=new_columns
 chaleur_insee = chaleur_insee.iloc[2:]
 chaleur_insee = chaleur_insee.apply(pd.to_numeric)
+# Rebaptême des colonnes d'indicateurs géographiques
+chaleur_insee = chaleur_insee.rename(columns={'ID Safran':'maille_drias'})
 chaleur_insee.to_csv(r"Données traitées\Zonage_chaleur_maille_drias.csv", index=False)
 
 """Revenu (Insee)"""
@@ -109,6 +115,7 @@ revenus_insee = revenus_insee.loc[np.isin(revenus_insee["IRIS"],iris_occitanie)]
 revenus_insee = revenus_insee[['IRIS','DISP_TP6021','DISP_MED21','DISP_PPSOC21','DISP_S80S2021']]
 revenus_insee.iloc[:,1:]=revenus_insee.iloc[:,1:].replace(',','.',regex=True)
 revenus_insee.iloc[:,1:]=revenus_insee.iloc[:,1:].apply(pd.to_numeric,errors='coerce')
+revenus_insee = revenus_insee.rename(columns={'IRIS':'code_iris'})
 revenus_insee = revenus_insee.rename(
     columns=dict(zip(revenus_insee.columns[1:],
                      [revenus_insee.columns[n]+"_data"for n in range(1,revenus_insee.shape[1])])))
@@ -127,6 +134,9 @@ revenus_insee["taux_pauv"] = revenus_insee["men_pauv"]/revenus_insee["men"]
 revenus_insee["moy_winsor_niv_vie"] = revenus_insee["ind_snv"]/revenus_insee["ind"]
 # Réagencement des colonnes pour une lecture plus aisée
 revenus_insee = revenus_insee.loc[:,['ind','men','men_pauv','ind_snv','taux_pauv','moy_winsor_niv_vie','geometry']]
+# Assignation d'un  indice pour aggrégation éventuelle
+revenus_insee = revenus_insee.reset_index()
+revenus_insee = revenus_insee.rename(columns={'index':'id_car'})
 # Écriture
 revenus_insee.to_file(r"Données traitées\Revenus_filosofi_2021.gpkg")
 
@@ -139,6 +149,7 @@ dpe_iris = dpe_iris.loc[np.isin(dpe_iris["Code IRIS"],iris_occitanie)]
 dpe_iris = dpe_iris.fillna(0) # Marquage de 0 comme donnée manquante sur la carte
 dpe_iris['Part de D et E'] = dpe_iris['Résidences Principales classe D ou E']/dpe_iris['Résidences Principales']
 dpe_iris['Part de F et G'] = dpe_iris['Résidences Principales classe F ou G']/dpe_iris['Résidences Principales']
+dpe_iris = dpe_iris.rename(columns={'Code IRIS':'code_iris'})
 dpe_iris = dpe_iris.rename(
     columns=dict(zip(dpe_iris.columns[1:],
                      [dpe_iris.columns[n]+"_data"for n in range(1,dpe_iris.shape[1])])))
@@ -155,11 +166,8 @@ pathologies = pathologies.loc[(pathologies['annee']=='2021') & (pathologies['reg
                               & (pathologies['dept']!='999')]
 # Conservation des colonnes d'intérêt
 pathologies = pathologies[['patho_niv1','patho_niv2','patho_niv3','top','dept','Ntop']]
-# pathologies = pathologies.loc[pathologies['patho_niv1'].isin(["Insuffisance rénale chronique terminale",
-#                                                               "Maladies cardioneurovasculaires",
-#                                                               "Maladies neurologiques",
-#                                                               "Maladies psychiatriques",
-#                                                               "Maladies respiratoires chroniques (hors mucoviscidose)"])]
+# Rebaptême des colonnes d'indicateurs géographiques
+pathologies = pathologies.rename(columns={'dept':'DEP'})
 # Suppression des sous-totaux par catégories de pathologie
 pathologies = pathologies.loc[~pd.isna(pathologies['patho_niv3'])]
 # Conservation des pathologies rendant vulnérable à la chaleur
@@ -169,9 +177,9 @@ pathologies_chaleur = pathologies.loc[pathologies['patho_niv1'].isin(["Insuffisa
                                                               "Maladies psychiatriques",
                                                               "Maladies respiratoires chroniques (hors mucoviscidose)"])]
 # Passage du tableau dans une forme plus exploitable
-pathologies_chaleur = pathologies_chaleur.pivot(index='dept',columns=['patho_niv3'],values='Ntop')
+pathologies_chaleur = pathologies_chaleur.pivot(index='DEP',columns=['patho_niv3'],values='Ntop')
 pathologies_chaleur['Vulnérables_chaleur']=pathologies_chaleur.sum(axis=1)
-pathologies_chaleur = pathologies_chaleur['Vulnérables_chaleur']
+pathologies_chaleur = pathologies_chaleur[['Vulnérables_chaleur']]
 pathologies_chaleur.columns = ['Vulnérables_chaleur_data']
 pathologies_chaleur.to_csv(r"Données traitées\Pathologies_chaleur_dept.csv")
 
@@ -243,9 +251,11 @@ trav_expo_chaleur = corr_pcs2_fap2.dot(trav_expo_chaleur).map(lambda x:min(1,x))
 trav_pcs = pd.read_csv(r"Données brutes\Insee_emploi_activité_en_2021.csv", sep=';',dtype='str')
 trav_pcs = trav_pcs[['CODGEO','CS3_29','NB']]
 trav_pcs = trav_pcs.replace(imp.deprecated_codes)
+# Rebaptême des colonnes d'indicateurs géographiques
+trav_pcs = trav_pcs.rename(columns={'CODGEO':'code_insee'})
 trav_pcs['NB'] = pd.to_numeric(trav_pcs['NB'])
     # Passage à une forme utilisable, restriction géographique à l'occitanie
-trav_pcs = trav_pcs.pivot_table(index='CODGEO', columns='CS3_29', values='NB', aggfunc='sum').loc[com_occitanie].fillna(0)
+trav_pcs = trav_pcs.pivot_table(index='code_insee', columns='CS3_29', values='NB', aggfunc='sum').loc[com_occitanie].fillna(0)
     # Aggrégation selon l'exposition à la chaleur et rebaptême pour inférence à la lecture
 trav_pcs = trav_pcs[trav_expo_chaleur.index].dot(trav_expo_chaleur).rename({'part_travail_exterieur':'Nombre_travail_exterieur_data'},axis=1)
 trav_pcs.to_csv(r"Données traitées\Travail_chaleur_commune.csv")

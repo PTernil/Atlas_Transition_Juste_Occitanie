@@ -102,5 +102,10 @@ maille_drias.to_file(r"Données traitées\maille drias.gpkg")
 table_corr = pd.read_excel(r"Données brutes\EPCI_au_01-01-2026.xlsx", sheet_name=1, header=5)
 table_corr = table_corr.loc[table_corr['REG']==76]
 table_corr = iris_occ.join(table_corr.set_index('CODGEO'), on='code_insee')
+epci = table_corr[['EPCI','LIBEPCI','geometry']].dissolve(by='EPCI')
+epci.to_file(r"Données traitées\EPCI.gpkg")
+
 table_corr = table_corr[['code_insee','code_iris','EPCI','DEP']].set_index('code_iris')
 table_corr.to_csv(r"Données traitées\Correspondance_echelle_admin.csv")
+
+
