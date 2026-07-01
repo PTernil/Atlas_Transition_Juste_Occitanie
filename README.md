@@ -23,7 +23,7 @@ En cas de traitement de nouvelles données en traitement_preliminaire.py, si ell
 
 >[!TIP]
 En cas de traitement de nouvelles données en traitement_preliminaire.py, si elles sont exportées au format .csv, on pourra ajouter au nom du fichier le suffixe '_IRIS', '_commune', '_EPCI', '_dept', '_maille_safran' ou '_maille_drias' en fonction de la maille utilisée, afin de permettre au programme de détecter automatiquement l'échelle à l'importation des données.\
-Dans ce cas, il faudra que l'identifiant géographique des données soit l'une des valeurs spécifiées dans import_donnees.geom_columns_dict et de préférence : 'code iris', 'code_insee', 'code_epci', 'code_dep', 'maille_safran' et 'maille_drias'
+Dans ce cas, il faudra que l'identifiant géographique des données soit l'une des valeurs spécifiées dans import_donnees.geom_columns_dict, et de préférence : 'code iris', 'code_insee', 'code_epci', 'code_dep', 'maille_safran' et 'maille_drias'
 
 >[!TIP]
 Le dossier Données utilisées peut être mobilisé pour sauvegarder des données obtenues par traitement dans la console de main.py. Le fichier off_main.py sert à réutiliser ces données.
