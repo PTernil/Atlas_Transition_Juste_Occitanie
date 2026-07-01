@@ -1,13 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Mar 25 15:04:50 2026
+Created on Thu Jun 25 11:24:46 2026
 Last authenticated version : Wed Jul 01 11:15 2026
 @author: ternilp
 """
 
+# Module pas entièrement fonctionnel, utilisé pour récupérer des données ayant été traitées par main.py et exportées au format gpkg
+# Pour des données obtenables assez facilement à partir des données issues de Données traitées, il est préférable de repasser par main.py
+
+
 # Importation des librairies
 import atlas_modules.import_donnees as imp
 from atlas_modules import carto
+import glob
+from pathlib import Path
 from tabulate import tabulate
 import matplotlib.pyplot as plt
 import os
@@ -20,27 +26,21 @@ if not os.getcwd().startswith('C:\\'):
 else:
     import_function = imp.import_fast
 
-# Importation des données
-n_data = imp.safe_ask("Nombre de jeux de données à importer :\n",int)
-
+directory = input("Nom du dossier contenant les données : ")
+# attrs = eval(input("attributes"))
+# geoms = []
+# for n, df in enumerate(datasets):
+#    datasets[df].attrs=attrs[n]
+# geoms = [(datasets[df].attrs['scale'],imp.geom_grid_dict[datasets[df].attrs['scale']]) for df in datasets]
 datasets = {}
 geoms = []
-for n in range(n_data):
-    print(f"\nJeu de données n°{n+1}")
-    filepath = imp.ask_filepath()
-    filepath = imp.check_filepath(filepath)[1]
-    treat = imp.safe_ask("Appliquer un traitement aux données ? y/[n]", str)
-    if treat=='y':
-        treatment = imp.select_list(imp.treatments,query=f"Sélectionnez un traitement parmi :\n\
-        \r\t- {'\n\r\t- '.join(imp.treatments)}\n")
-        datasets[filepath.stem] = import_function(filepath, treatment=treatment, compact=False)
-    else:
-        datasets[filepath.stem] = import_function(filepath, compact=False)
-    # Définition de la géométrie cadre pour chaque jeu de données
+for filepath in glob.glob(rf"Données utilisées\{directory}\*"):
+    datasets[Path(filepath).stem] = import_function(filepath, compact=False)
+    # Raccordement à la géométrie cadre
     geom_validation = False
-    while geom_validation is False:
-        geom_grid = imp.ask_geom(datasets[filepath.stem])
-        geom_data = imp.search_geom(geom_grid, datasets[filepath.stem])
+    while geom_validation is False:#todo: prendre en compte les admin_mixed (n'apparaissent pas dans le chemin classique)
+        geom_grid = imp.ask_geom(datasets[Path(filepath).stem])
+        geom_data = imp.search_geom(geom_grid, datasets[Path(filepath).stem])
         if not geom_data is None:
             geom_validation = True
     geoms.append((geom_grid,geom_data))
@@ -75,7 +75,6 @@ pop_dataset = grids['iris'].join(pop_dataset.set_index('code_iris'),
                                  on='code_iris', how="left", lsuffix='_grid').convert_dtypes()
 pop_dataset.attrs = {'name':'Base_Population','scale':'iris'}
 pop_variable = 'P21_POP'
-# Importation des données de revenu, pour traitement des autres données
 rev_dataset = import_function(r"Données traitées\Revenus_filosofi_2021.gpkg",compact=True).set_index('id_car')
 rev_dataset.attrs = {'name':'Base_Revenus','scale':None}
 print("Importation terminée.", flush=True)
@@ -86,9 +85,11 @@ prefs={
 }
 print("Extraction terminée.", flush=True)
 
+# Raccordement des données à la grille géographique de référence
+# Pour les données à géographie interne, vérification du système de projection
 if not [geoms[n][0]for n in range(len(geoms))] == [None for n in range(len(geoms))]:
     print("Raccordement des données aux références géographiques...")
-# Raccordement des données à la grille géographique de référence
+
 for n in range(len(datasets)):
     if geoms[n][0] is not None:
         attrs = datasets[dataset_list[n]].attrs
@@ -98,7 +99,7 @@ for n in range(len(datasets)):
             .set_index(imp.geom_grid_dict[geoms[n][0]])\
             .convert_dtypes()
         datasets[dataset_list[n]].attrs = attrs
-# Pour les données à géographie interne, vérification du système de projection
+
     else:
         if datasets[dataset_list[n]].crs.to_epsg()!=2154:
             print(f"{dataset_list[n]} n'utilise pas la projection Lambert-93.\n\
@@ -123,33 +124,39 @@ print("Sélection des variables à afficher\n\
       \r----------------------------------")
 variables = imp.ask_carto(datasets,pop_dataset)
 lecture = input("Indications de lecture :\n").replace('\\n','\n')
-# %% Agrégation
-# TODO: Permettre un normalisation par n'importe quelle variable importée et non seulement les variables de pop_dataset
-
-# Agrégation à un niveau supérieur pour clarté d'affichage, si nécessaire
-aggregation = input("Agrégation géographique à l'affichage ? y/[n]")
+# %% agrégation
+# TODO: allow selection of variable in datasets for normalisation
+# agrégation à un niveau supérieur pour clarté d'affichage, si nécessaire
+aggregation = input("agrégation géographique à l'affichage ? y/[n]")
 if aggregation == 'y':
-    # Sélection de l'échelle d'agrégation
     min_admin_scale = imp.select_list(list(carto.admin_scales),
                                       query = f"Échelle d'affichage parmi :\n\
                                       \r\t- {'\n\r\t- '.join(list(carto.admin_scales))}\n",
                                       catch_dict=carto.admin_scales_entries)
-    # Dictionnaire des jeux à agréger
     plot_datasets = [variables[n][0][0] for n in range(len(variables))]
     datasets_agg = dict([(key, datasets[key]) for key in plot_datasets])
-    # Agrégation totale : agrégation de TOUTES les données à l'échelle demandées (sauf données à un échelon supérieur)
-    # Agrégation partielle : agrégation des données sur une maille administrative uniquement
     full_agg = imp.safe_ask("agrégation totale : ",bool)
-    # Variable de poids utilisée pour les moyennes pondérées
     pop_variable = imp.select_list(list(pop_dataset.columns[4:])+['surface'],
                                    query=f"Nom de la variable d'agrégation parmi :\n\
                                    \r\t- {'\n\r\t- '.join(list(pop_dataset.columns[4:])+['surface'])}\n")
     var_names = [variables[n][0][1] for n in range(len(variables))]
     datasets_agg = imp.aggregate(datasets_agg,min_admin_scale,corr_admin,
                                  pop_dataset,pop_variable,geoms,var_names,full_agg,grids)
+    if min_admin_scale!='iris':
+        for n in range(len(geoms)):
+            if geoms[n][0] in carto.admin_scales[min_admin_scale]:
+                geoms[n] = (imp.geom_dict[min_admin_scale],
+                            imp.geom_grid_dict[imp.geom_dict[min_admin_scale]])
 else:
     datasets_agg = datasets
-    min_admin_scale = None
+    zonage = False
+    for n in range(len(variables)):
+        if variables[n][1]['type']=='Zonage':
+            zonage = True
+    if zonage:
+        min_admin_scale = None
+    else:
+        min_admin_scale = None
 
 # TODO: Carte
     # TODO: datatype hors cmap
