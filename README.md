@@ -26,7 +26,7 @@ En cas de traitement de nouvelles données en traitement_preliminaire.py, si ell
 Dans ce cas, il faudra que l'identifiant géographique des données soit l'une des valeurs spécifiées dans atlas_modules.import_donnees.geom_columns_dict et de préférence : 'code iris', 'code_insee', 'code_epci', 'code_dep', 'maille_safran' et 'maille_drias'
 
 >[!TIP]
->Le dossier Données utilisées peut être mobilisé pour sauvegarder des données obtenues par traitement dans la console de main.py. Le fichier off_main.py sert à réutiliser ces données.
+Le dossier Données utilisées peut être mobilisé pour sauvegarder des données obtenues par traitement dans la console de main.py. Le fichier off_main.py sert à réutiliser ces données.
 
-[!NOTE]
+>[!NOTE]
 La fonctionnalité d'off_main.py n'est pas garantie
