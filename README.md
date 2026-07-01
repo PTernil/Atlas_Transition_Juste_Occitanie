@@ -8,8 +8,8 @@ Racine du projet :
 - traitement_preliminaire.py
 -(off_main.py)
 - atlas_modules:
-- carto.py
-- import_données.py
+  - carto.py
+  - import_données.py
 - Cartes
 - Données brutes
 - Données traitées
