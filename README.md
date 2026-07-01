@@ -3,17 +3,17 @@ Module python servant à la création de cartes de la région Occitanie.
 >[!IMPORTANT]
 Le module est prévu pour une disposition des dossiers comme suit :
 Racine du projet :
-	- main.py
-	- grille_base.py
-	- traitement_preliminaire.py
-	(- off_main.py)
-	- atlas_modules:
-		- carto.py
-		- import_données.py
-	- Cartes
-	- Données brutes
-	- Données traitées
-	(- Données utilisées)
+- main.py
+- grille_base.py
+- traitement_preliminaire.py
+-(off_main.py)
+- atlas_modules:
+- carto.py
+- import_données.py
+- Cartes
+- Données brutes
+- Données traitées
+(- Données utilisées)
 
 >[!NOTE]
 Après exécution, des dossiers _pycache_ seront créés dans le dossier racine et le dossier atlas_modules. Ils peuvent être supprimés sans problème si le programme n'est pas en cours d'utilisation. 
