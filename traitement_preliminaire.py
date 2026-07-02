@@ -768,8 +768,8 @@ consos_par_dpe = pd.DataFrame(index=dpe_iris.columns[2:],data=[83,83,83*1.8,83*2
 dpe_iris['conso_m2_nb_log'] = dpe_iris.iloc[:,2:9].dot(consos_par_dpe.iloc[:7]) # Consommation au m²*nombre de logements (kWh)
 dpe_iris['conso_m2'] = dpe_iris.iloc[:,9:-1].dot(consos_par_dpe.iloc[7:]) # Consommation au m² moyenne (kWh)
 dpe_iris = dpe_iris.join(logement_insee[['Surf_moy_RP_infer_data','code_iris']].set_index('code_iris'),on='code_iris')
-dpe_iris['conso_DPE_GWhAn_infer'] = dpe_iris['conso_m2_nb_log']*dpe_iris['Surf_moy_RP_infer_data']/1e6
-dpe_iris['conso_DPE_MWhAnlog_infer'] = dpe_iris['conso_m2']*dpe_iris['Surf_moy_RP_infer_data']/1e3
+dpe_iris['conso_DPE_GWhAn_infer'] = dpe_iris['conso_m2_nb_log']*dpe_iris['Surf_moy_RP_infer_data']/1e6 # Consommation totale par IRIS
+dpe_iris['conso_DPE_MWhAnlog_infer'] = dpe_iris['conso_m2']*dpe_iris['Surf_moy_RP_infer_data']/1e3 # Consommation moyenne par logement
 dpe_iris = dpe_iris.drop(columns='Surf_moy_RP_infer_data')
 dpe_iris = dpe_iris.rename(
     columns=dict(zip(dpe_iris.columns[1:],
