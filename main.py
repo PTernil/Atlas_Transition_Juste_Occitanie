@@ -105,6 +105,8 @@ for n in range(len(datasets)):
                   \rReprojection en Lambert-93...", flush=True)
             datasets[dataset_list[n]].to_crs('EPSG:2154')
             print("Terminé.")
+if not [geoms[n][0]for n in range(len(geoms))] == [None for n in range(len(geoms))]:
+    print("Raccordement terminé.")
 
 corr_admin = import_function(r"Données traitées\Correspondance_echelle_admin.csv")
 corr_admin = [corr_admin,{'département':grids['dep'][['dep','geometry']],
