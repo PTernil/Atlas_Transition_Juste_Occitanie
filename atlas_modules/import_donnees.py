@@ -554,7 +554,7 @@ def search_geom(geom_grid, data, geom_data=None):
                      \rAppuyez sur Entrée pour revenir au choix de la géométrie de référence.\n")
         return search_geom(geom_grid, data, geom_data)
     elif geom_data=='':
-        return geom_data
+        return search_geom(ask_geom(data), data)
     else:   # Géométrie non prévue dans geom_columns_dict, nom de la colonne fourni
         columns=data.columns
         for column in columns:
